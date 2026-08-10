@@ -22,7 +22,7 @@ The build requires Docker Engine and NVIDIA Container Toolkit. The launcher uses
 - About 350 GB free on fast local storage for the completed Moet plane cache and NVMe expert pack
 - Two visible GPUs
 
-The official 0731 model uses DSpark speculative decoding, not MTP. Its separate download does not modify the existing MJPansa checkpoint cache.
+The official 0731 model uses DSpark speculative decoding, not MTP.
 
 The launcher disables NCCL P2P and vLLM PCIe all-reduce. On this host's PCIe `PHB` topology, NCCL otherwise deadlocks immediately after distributed initialization with both GPUs at 100% and only about 1 GB VRAM allocated.
 
@@ -153,3 +153,10 @@ Use `reasoning_effort` through vLLM's chat template arguments:
   "chat_template_kwargs": {"thinking": true, "reasoning_effort": "high"}
 }
 ```
+
+## Roadmap
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for gated follow-up experiments,
+including sequence-concurrency measurements, the KV-versus-expert VRAM
+tradeoff, an LMCache/NVMe prefix-cache proof of concept, and the hardware
+requirements for future prefill/decode disaggregation.
