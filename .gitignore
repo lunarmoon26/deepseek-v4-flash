@@ -1,0 +1,12 @@
+.venv/
+.env
+.env.*
+!.env.example
+.cache/
+cache/
+logs/
+models/
+benchmark-results/
+*.safetensors
+*.gguf
+__pycache__/

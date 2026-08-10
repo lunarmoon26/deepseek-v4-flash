@@ -1,0 +1,3 @@
+[submodule "vendor/vLLM-Moet"]
+	path = vendor/vLLM-Moet
+	url = https://github.com/kacper-daftcode/vLLM-Moet.git
