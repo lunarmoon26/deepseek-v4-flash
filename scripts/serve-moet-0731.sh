@@ -12,6 +12,9 @@ export MOET_PLANES_CACHE="${MOET_PLANES_CACHE:-$ROOT/cache/moet-planes-0731}"
 # Keep the FP4 expert recovery store on NVMe. Without this setting vLLM-Moet
 # uses a pinned/pageable host-RAM store that is larger than this machine's RAM.
 export MOET_STORE_DIR="${MOET_STORE_DIR:-$MOET_PLANES_CACHE/packs-ds4-tp2}"
+# Optional TP=2 rank-0 override. vLLM-Moet still sees one /packs directory;
+# Docker overlays rank 0's individual files from this second filesystem.
+export MOET_STORE_RANK0_DIR="${MOET_STORE_RANK0_DIR:-}"
 export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-deepseek-v4-flash}"
 export VLLM_PORT="${SERVER_PORT:-8000}"
 # Keep enough physical RAM for the desktop and GPU driver on this 44 GiB-RAM
@@ -45,6 +48,76 @@ mkdir -p "$MOET_STORE_DIR"
   printf '%s\n' "Moet NVMe store path is unavailable: $MOET_STORE_DIR"
   exit 1
 }
+
+rank0_mount_args=()
+if [[ -n "$MOET_STORE_RANK0_DIR" ]]; then
+  for command in cmp findmnt stat; do
+    command -v "$command" >/dev/null || {
+      printf 'Missing required command for the rank-0 override: %s\n' "$command"
+      exit 1
+    }
+  done
+  [[ -d "$MOET_STORE_RANK0_DIR" ]] || {
+    printf '%s\n' "Rank-0 store path is unavailable: $MOET_STORE_RANK0_DIR"
+    printf '%s\n' "Run ./scripts/split-moet-store-tp2.sh after the first healthy startup."
+    exit 1
+  }
+  rank0_device="$(findmnt -n -o SOURCE -T "$MOET_STORE_RANK0_DIR")"
+  shared_device="$(findmnt -n -o SOURCE -T "$MOET_STORE_DIR")"
+  [[ "$rank0_device" != "$shared_device" ]] || {
+    printf '%s\n' "Rank-0 override and shared store are on the same filesystem: $rank0_device"
+    exit 1
+  }
+
+  shopt -s nullglob
+  rank0_packs=("$MOET_STORE_RANK0_DIR"/*.rank0of2.pack)
+  shopt -u nullglob
+  (( ${#rank0_packs[@]} == 1 )) || {
+    printf '%s\n' "Expected exactly one rank0of2 pack in $MOET_STORE_RANK0_DIR; found ${#rank0_packs[@]}."
+    exit 1
+  }
+
+  rank0_pack="${rank0_packs[0]}"
+  rank0_stem="$(basename "$rank0_pack" .pack)"
+  [[ -f "$MOET_STORE_RANK0_DIR/$rank0_stem.json" && \
+     -f "$MOET_STORE_RANK0_DIR/$rank0_stem.lock" ]] || {
+    printf '%s\n' "Rank-0 pack sidecar or lock file is missing for $rank0_stem."
+    exit 1
+  }
+
+  for extension in pack json lock; do
+    rank0_name="$rank0_stem.$extension"
+    rank1_name="${rank0_name/.rank0of2./.rank1of2.}"
+    rank0_source="$MOET_STORE_RANK0_DIR/$rank0_name"
+    rank0_fallback="$MOET_STORE_DIR/$rank0_name"
+    rank1_source="$MOET_STORE_DIR/$rank1_name"
+    [[ -f "$rank0_fallback" && -f "$rank1_source" ]] || {
+      printf '%s\n' "Shared store is missing $rank0_name or $rank1_name."
+      exit 1
+    }
+    if [[ "$extension" == "pack" ]]; then
+      rank0_size="$(stat -c %s "$rank0_source")"
+      fallback_size="$(stat -c %s "$rank0_fallback")"
+      rank1_size="$(stat -c %s "$rank1_source")"
+      [[ "$rank0_size" == "$fallback_size" && "$rank0_size" == "$rank1_size" ]] || {
+        printf '%s\n' "Rank pack sizes do not match; refusing the per-rank mount."
+        exit 1
+      }
+    elif [[ "$extension" == "json" ]]; then
+      cmp -s "$rank0_source" "$rank0_fallback" || {
+        printf '%s\n' "Rank-0 sidecar differs from its verified shared-store fallback."
+        exit 1
+      }
+    fi
+    # Binding individual files makes an automatic stale-pack os.replace fail
+    # visibly (EBUSY) instead of silently rebuilding rank 0 on the wrong SSD.
+    rank0_mount_args+=(
+      --mount "type=bind,src=$rank0_source,dst=/packs/$rank0_name"
+    )
+  done
+  printf 'Using TP rank 0 pack from %s (%s); rank 1 remains in %s (%s).\n' \
+    "$MOET_STORE_RANK0_DIR" "$rank0_device" "$MOET_STORE_DIR" "$shared_device"
+fi
 
 host_virtual_kib=0
 while read -r key value _; do
@@ -80,6 +153,7 @@ exec docker run "${docker_remove_arg[@]}" \
   -v "$MODEL_PATH:/model:ro" \
   -v "$MOET_PLANES_CACHE:/planes" \
   -v "$MOET_STORE_DIR:/packs" \
+  "${rank0_mount_args[@]}" \
   -e NCCL_P2P_DISABLE=1 \
   -e PYTORCH_CUDA_ALLOC_CONF="$PYTORCH_CUDA_ALLOC_CONF" \
   -e VLLM_ENABLE_PCIE_ALLREDUCE=0 \

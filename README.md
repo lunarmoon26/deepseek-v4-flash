@@ -47,7 +47,19 @@ MOET_PLANES_CACHE="${DEEPSEEK_NVME1_MOUNT}/moet-planes-0731"
 MOET_STORE_DIR="${DEEPSEEK_NVME2_MOUNT}/moet-store-0731"
 ```
 
-The plane cache is about 203 GiB and is used primarily during conversion and startup. The TP=2 FP4 pack store is about 130 GiB and supplies expert rows during inference, so it belongs on the other SSD. This splits the two major cache roles and prevents all runtime traffic from landing on the first drive. vLLM-Moet supports one pack directory for both TP ranks; simultaneous rank-by-rank striping would require a striped filesystem or a backend change.
+The plane cache is about 203 GiB and is used primarily during conversion and startup. The TP=2 FP4 pack store is about 130 GiB and supplies expert rows during inference, so it initially belongs on the other SSD.
+
+[The pinned vLLM-Moet revision](https://github.com/kacper-daftcode/vLLM-Moet/tree/0a927eafa2e7249099073e4c3bb1169ba4b1c328) creates separate `rank0of2` and `rank1of2` pack files inside its one configured store directory. It does not expose a separate directory setting per rank. After the first successful build, rank 0 can be copied to the plane-cache SSD and overlaid into the container as an individual bind mount:
+
+```bash
+# Add this to the ignored .env file:
+MOET_STORE_RANK0_DIR="${DEEPSEEK_NVME1_MOUNT}/moet-store-rank0-0731"
+
+./scripts/split-moet-store-tp2.sh
+# Restart ./scripts/serve-moet-0731.sh after the verified copy completes.
+```
+
+The launcher then reads rank 0 from SSD1 and rank 1 from SSD2 while vLLM-Moet still sees a single `/packs` directory. It validates the two stores before launch and uses file bind mounts so a stale automatic rebuild fails visibly instead of silently putting rank 0 back on SSD2. Keep the original rank-0 files in `MOET_STORE_DIR`: they are rollback copies and provide the underlying Docker mount targets.
 
 The pack files are read-only after their first successful build. A difference in lifetime bytes written immediately after conversion is therefore expected and is not evidence of continuing write amplification; steady inference is predominantly reads. Keep the old pack directory until the server has started and passed `scripts/smoke-test.sh` from the new location.
 
