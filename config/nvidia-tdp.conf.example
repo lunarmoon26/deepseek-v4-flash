@@ -1,0 +1,3 @@
+# Maximum board power in watts for every NVIDIA GPU on this host.
+# RTX PRO 6000 Blackwell Workstation Edition: valid range 150–600 W.
+GPU_POWER_LIMIT_WATTS=300

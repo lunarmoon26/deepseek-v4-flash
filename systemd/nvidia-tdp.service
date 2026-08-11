@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply DeepSeek NVIDIA GPU power limit
+Wants=nvidia-persistenced.service
+After=nvidia-persistenced.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/deepseek-v4-flash-set-nvidia-tdp
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

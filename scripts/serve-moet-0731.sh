@@ -37,6 +37,12 @@ export MOET_CONTAINER_MEMORY_SWAP="${MOET_CONTAINER_MEMORY_SWAP:-200g}"
 # Keep the CUDA caching allocator from fragmenting VRAM before graph capture.
 # This matches the upstream RTX PRO 6000 TP2 recipe.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# With the host IOMMU disabled, both RTX PRO 6000 GPUs support CUDA peer
+# access across their shared PHB. Keep these configurable for a one-line
+# rollback if firmware or topology changes reintroduce an NCCL hang.
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
+export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-PHB}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 
 command -v docker >/dev/null || {
   printf '%s\n' "Docker Engine is required. Run ./scripts/build-moet.sh after installing Docker Engine and NVIDIA Container Toolkit."
@@ -167,7 +173,9 @@ exec docker run "${docker_remove_arg[@]}" \
   -v "$MOET_PLANES_CACHE:/planes" \
   -v "$MOET_STORE_DIR:/packs" \
   "${rank0_mount_args[@]}" \
-  -e NCCL_P2P_DISABLE=1 \
+  -e NCCL_P2P_DISABLE="$NCCL_P2P_DISABLE" \
+  -e NCCL_P2P_LEVEL="$NCCL_P2P_LEVEL" \
+  -e NCCL_DEBUG="$NCCL_DEBUG" \
   -e PYTORCH_CUDA_ALLOC_CONF="$PYTORCH_CUDA_ALLOC_CONF" \
   -e VLLM_ENABLE_PCIE_ALLREDUCE=0 \
   -e NVIDIA_VISIBLE_DEVICES=0,1 \

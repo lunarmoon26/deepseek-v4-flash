@@ -14,6 +14,33 @@ test -e .env || cp .env.example .env
 
 The build requires Docker Engine and NVIDIA Container Toolkit. The launcher uses both GPUs and exposes the API at `http://127.0.0.1:8000/v1` by default.
 
+## GPU power limit
+
+GPU board power is a host-driver setting, not a Docker setting. The repository
+ships a systemd-managed 300 W cap for every NVIDIA GPU, which is safer and
+survives container restarts without giving the inference container privileged
+access to `nvidia-smi`:
+
+```bash
+sudo ./scripts/install-nvidia-tdp-service.sh
+nvidia-smi --query-gpu=index,name,power.limit --format=csv,noheader
+```
+
+The installer replaces the Lambda-style `nvidia-tdp.service` with a unit that
+waits for `nvidia-smi` for up to 60 seconds. It preserves a timestamped backup
+of an existing unit, copies the checked-in helper to `/usr/local/libexec`, and
+creates the host-only configuration at
+`/etc/deepseek-v4-flash/nvidia-tdp.conf`. To use another supported value, edit
+that file and restart the service:
+
+```bash
+sudoedit /etc/deepseek-v4-flash/nvidia-tdp.conf
+sudo systemctl restart nvidia-tdp.service
+```
+
+The RTX PRO 6000 Blackwell cards in this host support 150–600 W. A 300 W cap
+will reduce heat and power use, but it may also reduce token throughput.
+
 ## Requirements
 
 - NVIDIA 595.71.05 or newer with the **open kernel modules** (`nvidia-driver-595-server-open` on this Ubuntu host)
@@ -24,7 +51,25 @@ The build requires Docker Engine and NVIDIA Container Toolkit. The launcher uses
 
 The official 0731 model uses DSpark speculative decoding, not MTP.
 
-The launcher disables NCCL P2P and vLLM PCIe all-reduce. On this host's PCIe `PHB` topology, NCCL otherwise deadlocks immediately after distributed initialization with both GPUs at 100% and only about 1 GB VRAM allocated.
+The launcher uses NCCL's CUDA P2P transport across this host's PCIe `PHB`
+topology while keeping vLLM's custom PCIe all-reduce disabled. This requires
+IOMMU to be disabled in firmware on this machine. Confirm both directions show
+`OK` before launching:
+
+```bash
+nvidia-smi topo -p2p r
+nvidia-smi topo -p2p w
+```
+
+With IOMMU disabled, NCCL 2.28.9 reports both channels as `P2P/CUMEM`. A local
+256 MiB two-rank all-reduce test improved from 13.86 GiB/s with P2P disabled to
+19.91 GiB/s with `NCCL_P2P_LEVEL=PHB`, and the full 400K server completed
+startup and its smoke test. If a BIOS, driver, or topology change reintroduces
+the old distributed-initialization hang, use the rollback:
+
+```bash
+NCCL_P2P_DISABLE=1 ./scripts/serve-moet-0731.sh
+```
 
 The first `vLLM-Moet` conversion requires at least 220 GiB combined RAM and swap; 128 GiB or more physical RAM is recommended. On this RAM-constrained host, generated planes are persisted under `MOET_PLANES_CACHE`, while the FP4 expert recovery store is persisted under `MOET_STORE_DIR`. Keeping the expert store on NVMe is essential: without it, vLLM-Moet tries to hold a much larger expert store in host memory.
 
