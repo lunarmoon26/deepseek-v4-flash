@@ -17,6 +17,14 @@ export MOET_STORE_DIR="${MOET_STORE_DIR:-$MOET_PLANES_CACHE/packs-ds4-tp2}"
 export MOET_STORE_RANK0_DIR="${MOET_STORE_RANK0_DIR:-}"
 export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-deepseek-v4-flash}"
 export VLLM_PORT="${SERVER_PORT:-8000}"
+# The context limit includes both prompt and generated tokens. With the current
+# 24 GiB/rank FP4 recovery split, the final 400K geometry measured 3,083,785 KV
+# tokens and completed two exact-boundary requests concurrently.
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-400000}"
+export MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
+export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1024}"
+export FP4_RECOVERY_POOL_GB="${FP4_RECOVERY_POOL_GB:-24}"
+export GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.92}"
 # Keep enough physical RAM for the desktop and GPU driver on this 44 GiB-RAM
 # host. Docker's memory-swap limit is total RAM + swap available to the
 # container, not additional swap.
@@ -132,6 +140,11 @@ if (( host_virtual_kib < minimum_virtual_kib )); then
   exit 1
 fi
 
+if (( MAX_NUM_SEQS < 2 )); then
+  printf '%s\n' "MAX_NUM_SEQS must be at least 2 for sparse-MLA warm-up."
+  exit 1
+fi
+
 docker_remove_arg=(--rm)
 if [[ "${MOET_KEEP_CONTAINER:-0}" == "1" ]]; then
   # Retain an exited container for `docker inspect` diagnostics. Default is
@@ -162,7 +175,7 @@ exec docker run "${docker_remove_arg[@]}" \
   -e VLLM_MOE_W2=1 \
   -e VLLM_MOE_W2_PLANES_CACHE=/planes \
   -e VLLM_MOE_W2_STORE_DIR=/packs \
-  -e VLLM_MOE_W2_DELTA_GB=24 \
+  -e VLLM_MOE_W2_DELTA_GB="$FP4_RECOVERY_POOL_GB" \
   -e VLLM_MOE_W2_GATE=1 \
   -e VLLM_USE_B12X_FP8_GEMM=0 \
   vllm-moet-sm120:v024 \
@@ -174,10 +187,10 @@ exec docker run "${docker_remove_arg[@]}" \
   --disable-custom-all-reduce \
   --kv-cache-dtype fp8_ds_mla \
   --block-size 256 \
-  --max-model-len 32768 \
-  --gpu-memory-utilization 0.92 \
-  --max-num-batched-tokens 1024 \
-  --max-num-seqs 2 \
+  --max-model-len "$MAX_MODEL_LEN" \
+  --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+  --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
+  --max-num-seqs "$MAX_NUM_SEQS" \
   --tokenizer-mode deepseek_v4 \
   --no-scheduler-reserve-full-isl \
   --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}' \

@@ -10,22 +10,28 @@ an experiment passes its validation gates.
 As of 2026-08-11, the verified service has:
 
 - two RTX PRO 6000 Blackwell GPUs running one TP=2 model instance;
-- a 32,768-token served context window and `--max-num-seqs 2`;
+- a 400,000-token total context window and `--max-num-seqs 2`;
 - DSpark speculative decoding and an `fp8_ds_mla` KV cache;
-- a 24 GiB FP4 expert recovery pool;
+- a 24 GiB/rank FP4 expert recovery pool;
 - TP rank expert-pack reads split across the two data SSDs;
 - a 34 GiB container RAM limit protecting the 48 GB desktop host.
 
-At startup, vLLM reported 15.57 GiB available for its GPU KV cache, 978,124
-tokens of KV capacity, and theoretical capacity for 29.85 full 32K contexts.
-The two-sequence scheduler limit can use at most 65,536 active tokens, about
-6.7% of that token capacity. KV capacity is therefore not the current serving
-bottleneck.
+At startup with the final geometry, vLLM reported 15.12 GiB available for its
+GPU KV cache, 3,083,785 tokens of KV capacity, and theoretical capacity for
+7.71 full 400K contexts. The scheduler is intentionally capped at two. An
+exact-boundary run of two independent 399,872-token prompts plus 128 generated
+tokens completed without failures in 504.4 seconds at 1,586 aggregate
+tokens/s. Both pack SSDs were active and container RAM remained near 7.4 GiB.
+
+This proves capacity and execution, not retrieval quality. During the C2
+stress run the 4,096-slot FP4 recovery pool became fully pinned and logged
+failed expert promotions with zeroed contributions. A deterministic 400K
+needle suite must pass before calling the full window quality-verified.
 
 ## Priority 1: measure before adding another cache tier
 
-- Record serving benchmarks at concurrency 1 and 2 with the existing
-  `scripts/bench-vllm-32k.sh` wrapper.
+- Add deterministic needle/retrieval checks at 128K, 256K, and 400K, including
+  a two-request 400K stress case.
 - Test `--max-num-seqs 4` separately before adding storage offload. Preserve
   the value 2 in the stable launcher until startup, quality, latency, and
   memory use pass.

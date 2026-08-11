@@ -15,5 +15,5 @@ curl --fail --silent --show-error "http://$HOST:$PORT/v1/models"
 printf '\n'
 curl --fail --silent --show-error "http://$HOST:$PORT/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 17 times 19? Return only the integer.\"}],\"temperature\":0}"
+  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 17 times 19? Return only the integer.\"}],\"temperature\":0,\"seed\":0,\"max_completion_tokens\":128}"
 printf '\n'
