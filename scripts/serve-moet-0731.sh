@@ -2,13 +2,36 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A local .env supplies normal machine defaults, while an explicit environment
+# assignment on the launch command is useful for a reversible benchmark. Save
+# the latter before sourcing .env so it has the expected command-line
+# precedence without writing local settings or credentials.
+declare -A launch_overrides=()
+for variable in \
+  VLLM_CACHE_DIR \
+  MAX_NUM_BATCHED_TOKENS \
+  FP4_RECOVERY_POOL_GB \
+  DSPARK_NUM_SPECULATIVE_TOKENS \
+  VLLM_MOE_W2_DELTA_TRACE \
+  VLLM_MOE_W2_DELTA_TRACE_EVERY; do
+  if [[ -v "$variable" ]]; then
+    launch_overrides["$variable"]="${!variable}"
+  fi
+done
 if [[ -f "$ROOT/.env" ]]; then
   # shellcheck disable=SC1091
   source "$ROOT/.env"
 fi
+for variable in "${!launch_overrides[@]}"; do
+  export "$variable=${launch_overrides[$variable]}"
+done
 
 export MODEL_PATH="${MODEL_PATH:-$ROOT/models/DeepSeek-V4-Flash-0731}"
 export MOET_PLANES_CACHE="${MOET_PLANES_CACHE:-$ROOT/cache/moet-planes-0731}"
+# Keep vLLM and FlashInfer's compiled-kernel/autotuning cache across disposable
+# containers. This has no effect on serving memory or token throughput, but
+# makes later restarts considerably faster.
+export VLLM_CACHE_DIR="${VLLM_CACHE_DIR:-$ROOT/cache/vllm}"
 # Keep the FP4 expert recovery store on NVMe. Without this setting vLLM-Moet
 # uses a pinned/pageable host-RAM store that is larger than this machine's RAM.
 export MOET_STORE_DIR="${MOET_STORE_DIR:-$MOET_PLANES_CACHE/packs-ds4-tp2}"
@@ -18,12 +41,17 @@ export MOET_STORE_RANK0_DIR="${MOET_STORE_RANK0_DIR:-}"
 export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-deepseek-v4-flash}"
 export VLLM_PORT="${SERVER_PORT:-8000}"
 # The context limit includes both prompt and generated tokens. With the current
-# 24 GiB/rank FP4 recovery split, the final 400K geometry measured 3,083,785 KV
+# 24 GiB/rank FP4 recovery split, the final 400K geometry measured 1,765,220 KV
 # tokens and completed two exact-boundary requests concurrently.
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-400000}"
 export MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
-export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1024}"
+# Measured winner for this TP=2 host at concurrency 2. It still leaves enough
+# KV capacity for two exact 400K-token requests with the 24 GiB FP4 pool.
+export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 export FP4_RECOVERY_POOL_GB="${FP4_RECOVERY_POOL_GB:-24}"
+# DSpark's draft length trades speculative acceptance against draft work. Keep
+# it configurable so this host can benchmark its own best value.
+export DSPARK_NUM_SPECULATIVE_TOKENS="${DSPARK_NUM_SPECULATIVE_TOKENS:-7}"
 export GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.92}"
 # Keep enough physical RAM for the desktop and GPU driver on this 44 GiB-RAM
 # host. Docker's memory-swap limit is total RAM + swap available to the
@@ -43,6 +71,10 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
 export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-PHB}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+# Set to 1 temporarily while comparing FP4 recovery-pool sizes. The trace is
+# deliberately off by default because it is verbose during normal serving.
+export VLLM_MOE_W2_DELTA_TRACE="${VLLM_MOE_W2_DELTA_TRACE:-0}"
+export VLLM_MOE_W2_DELTA_TRACE_EVERY="${VLLM_MOE_W2_DELTA_TRACE_EVERY:-64}"
 
 command -v docker >/dev/null || {
   printf '%s\n' "Docker Engine is required. Run ./scripts/build-moet.sh after installing Docker Engine and NVIDIA Container Toolkit."
@@ -57,9 +89,13 @@ command -v docker >/dev/null || {
   printf '%s\n' "Run sudo env ERASE_DEEPSEEK_NVME=YES ./scripts/setup-nvme.sh first."
   exit 1
 }
-mkdir -p "$MOET_STORE_DIR"
+mkdir -p "$MOET_STORE_DIR" "$VLLM_CACHE_DIR"
 [[ -d "$MOET_STORE_DIR" && -w "$MOET_STORE_DIR" ]] || {
   printf '%s\n' "Moet NVMe store path is unavailable: $MOET_STORE_DIR"
+  exit 1
+}
+[[ -d "$VLLM_CACHE_DIR" && -w "$VLLM_CACHE_DIR" ]] || {
+  printf '%s\n' "Persistent vLLM cache path is unavailable: $VLLM_CACHE_DIR"
   exit 1
 }
 
@@ -150,6 +186,22 @@ if (( MAX_NUM_SEQS < 2 )); then
   printf '%s\n' "MAX_NUM_SEQS must be at least 2 for sparse-MLA warm-up."
   exit 1
 fi
+if ! [[ "$DSPARK_NUM_SPECULATIVE_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+  printf '%s\n' "DSPARK_NUM_SPECULATIVE_TOKENS must be a positive integer."
+  exit 1
+fi
+if ! [[ "$VLLM_MOE_W2_DELTA_TRACE" =~ ^[01]$ ]]; then
+  printf '%s\n' "VLLM_MOE_W2_DELTA_TRACE must be 0 or 1."
+  exit 1
+fi
+if ! [[ "$VLLM_MOE_W2_DELTA_TRACE_EVERY" =~ ^[1-9][0-9]*$ ]]; then
+  printf '%s\n' "VLLM_MOE_W2_DELTA_TRACE_EVERY must be a positive integer."
+  exit 1
+fi
+
+printf -v dspark_config \
+  '{"method":"dspark","num_speculative_tokens":%s,"draft_sample_method":"greedy"}' \
+  "$DSPARK_NUM_SPECULATIVE_TOKENS"
 
 docker_remove_arg=(--rm)
 if [[ "${MOET_KEEP_CONTAINER:-0}" == "1" ]]; then
@@ -172,11 +224,13 @@ exec docker run "${docker_remove_arg[@]}" \
   -v "$MODEL_PATH:/model:ro" \
   -v "$MOET_PLANES_CACHE:/planes" \
   -v "$MOET_STORE_DIR:/packs" \
+  -v "$VLLM_CACHE_DIR:/root/.cache/vllm" \
   "${rank0_mount_args[@]}" \
   -e NCCL_P2P_DISABLE="$NCCL_P2P_DISABLE" \
   -e NCCL_P2P_LEVEL="$NCCL_P2P_LEVEL" \
   -e NCCL_DEBUG="$NCCL_DEBUG" \
   -e PYTORCH_CUDA_ALLOC_CONF="$PYTORCH_CUDA_ALLOC_CONF" \
+  -e VLLM_CACHE_ROOT=/root/.cache/vllm \
   -e VLLM_ENABLE_PCIE_ALLREDUCE=0 \
   -e NVIDIA_VISIBLE_DEVICES=0,1 \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
@@ -185,6 +239,8 @@ exec docker run "${docker_remove_arg[@]}" \
   -e VLLM_MOE_W2_STORE_DIR=/packs \
   -e VLLM_MOE_W2_DELTA_GB="$FP4_RECOVERY_POOL_GB" \
   -e VLLM_MOE_W2_GATE=1 \
+  -e VLLM_MOE_W2_DELTA_TRACE="$VLLM_MOE_W2_DELTA_TRACE" \
+  -e VLLM_MOE_W2_DELTA_TRACE_EVERY="$VLLM_MOE_W2_DELTA_TRACE_EVERY" \
   -e VLLM_USE_B12X_FP8_GEMM=0 \
   vllm-moet-sm120:v024 \
   --model /model \
@@ -204,5 +260,5 @@ exec docker run "${docker_remove_arg[@]}" \
   --enable-auto-tool-choice \
   --reasoning-parser deepseek_v4 \
   --no-scheduler-reserve-full-isl \
-  --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}' \
+  --speculative-config "$dspark_config" \
   --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'

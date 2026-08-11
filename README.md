@@ -132,11 +132,16 @@ The normal launch is:
 ```
 
 The checked-in defaults serve a 400,000-token total context with two request
-slots and the 24 GiB/rank FP4 recovery pool. Prompt plus generated tokens must
-remain at or below 400,000; clients may request at most 128,000 generated
-tokens. For reproducible greedy requests on this experimental DSpark path, use
-`temperature: 0`, `seed: 0`, and `max_completion_tokens` rather than the
-deprecated `max_tokens` field.
+slots, 4,096 batched tokens, DSpark-7, and the 24 GiB/rank FP4 recovery pool.
+Prompt plus generated tokens must remain at or below 400,000; clients may
+request at most 128,000 generated tokens. For reproducible greedy requests on
+this experimental DSpark path, use `temperature: 0`, `seed: 0`, and
+`max_completion_tokens` rather than the deprecated `max_tokens` field.
+
+The launcher keeps the vLLM/FlashInfer autotuning cache in the ignored
+`cache/vllm` directory by default. It is mounted back into disposable
+containers, so restarts reuse tuned kernels. Override `VLLM_CACHE_DIR` in the
+local `.env` only when the cache should live elsewhere.
 
 Do not add `--safetensors-load-strategy eager`: this checkpoint contains the `F8_E8M0` dtype, which the eager safetensors path cannot decode. If the disk-backed run still reaches the container limit while the desktop remains responsive, increase `MOET_CONTAINER_MEMORY` in 2 GiB steps while preserving a meaningful host reserve. Keep `MOET_CONTAINER_MEMORY_SWAP` at least 200 GiB for a first conversion:
 
@@ -198,11 +203,13 @@ submits two 400K requests while keeping generated output short:
 ./scripts/bench-vllm-32k.sh 399872 128 2 2 400000
 ```
 
-On this host the 2026-08-11 run completed both requests without failures in
-504.4 seconds at 1,586 aggregate tokens/s. Treat this as a capacity and
-performance result, not a long-context quality certification: the stress run
-logged FP4 recovery-pool promotion misses, so a 400K needle/retrieval suite is
-still required.
+At the fixed 300 W per-GPU cap, the 2026-08-11 tuning run chose 4,096 batched
+tokens, a 24 GiB/rank FP4 recovery pool, and DSpark-7. Its two-client 32K +
+512-token benchmark reached 1,739 aggregate tokens/s, 26.75 generated
+tokens/s, and 23.0 s median TTFT. The exact 400K boundary run then completed
+both requests without failures in 425.6 seconds at 1,880 aggregate tokens/s.
+Treat this as a capacity and performance result, not a long-context quality
+certification: a 400K needle/retrieval suite is still required.
 
 The benchmark reports request throughput, input/output token throughput, time to first token (TTFT), time per output token (TPOT), inter-token latency (ITL), and end-to-end latency. `INPUT_TOKENS + OUTPUT_TOKENS` must remain at or below the served context limit. Each invocation uses a fresh random seed and defaults to zero warm-up requests so TTFT measures uncached prompts. Set `BENCH_SEED` explicitly only when reproducing a run against a freshly started server.
 Prompt contents use that changing seed, while request sampling defaults to the

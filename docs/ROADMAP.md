@@ -11,22 +11,42 @@ As of 2026-08-11, the verified service has:
 
 - two RTX PRO 6000 Blackwell GPUs running one TP=2 model instance;
 - a 400,000-token total context window and `--max-num-seqs 2`;
-- DSpark speculative decoding and an `fp8_ds_mla` KV cache;
+- DSpark-7 speculative decoding, 4,096 maximum batched tokens, and an
+  `fp8_ds_mla` KV cache;
 - a 24 GiB/rank FP4 expert recovery pool;
 - TP rank expert-pack reads split across the two data SSDs;
 - a 34 GiB container RAM limit protecting the 48 GB desktop host.
 
-At startup with the final geometry, vLLM reported 15.12 GiB available for its
-GPU KV cache, 3,083,785 tokens of KV capacity, and theoretical capacity for
-7.71 full 400K contexts. The scheduler is intentionally capped at two. An
-exact-boundary run of two independent 399,872-token prompts plus 128 generated
-tokens completed without failures in 504.4 seconds at 1,586 aggregate
-tokens/s. Both pack SSDs were active and container RAM remained near 7.4 GiB.
+At startup with the final geometry, vLLM reported 13.57 GiB available for its
+GPU KV cache, 1,765,220 tokens of KV capacity, and theoretical capacity for
+4.41 full 400K contexts. The scheduler is intentionally capped at two. At the
+fixed 300 W per-GPU power cap, an exact-boundary run of two independent
+399,872-token prompts plus 128 generated tokens completed without failures in
+425.6 seconds at 1,880 aggregate tokens/s. During the run both GPUs held the
+300 W cap at 100% utilization and container RAM stayed below 7 GiB.
 
-This proves capacity and execution, not retrieval quality. During the C2
-stress run the 4,096-slot FP4 recovery pool became fully pinned and logged
-failed expert promotions with zeroed contributions. A deterministic 400K
-needle suite must pass before calling the full window quality-verified.
+This proves capacity and execution, not retrieval quality. A deterministic
+400K needle suite must pass before calling the full window quality-verified.
+
+## Completed tuning: 2026-08-11
+
+Synthetic two-client 32K prompt plus 512-token output measurements selected
+the stable launcher configuration above:
+
+- raising `MAX_NUM_BATCHED_TOKENS` from 1,024 to 4,096 improved aggregate
+  throughput from 1,103 to 1,739 tokens/s and median TTFT from 38.8 to
+  23.0 seconds;
+- DSpark-7 outperformed DSpark-5 and DSpark-3 at 4,096 tokens: 1,739 versus
+  1,669 and 1,676 aggregate tokens/s respectively;
+- a 28 GiB/rank FP4 recovery pool increased observed recovery coverage but
+  reduced available KV capacity to 1,245,285 tokens and regressed aggregate
+  throughput to 1,510 tokens/s, so the 24 GiB pool remains the baseline;
+- a 32 GiB pool was not launched because the observed 24-to-28 GiB KV loss
+  extrapolates below the 800,000 KV tokens required for two 400K requests.
+
+The launcher now persists vLLM and FlashInfer autotuning data under the
+ignored `cache/vllm` directory, allowing compatible restart geometries to
+reuse their tuned kernels.
 
 ## Priority 1: measure before adding another cache tier
 
